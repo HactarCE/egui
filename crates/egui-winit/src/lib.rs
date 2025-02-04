@@ -32,6 +32,17 @@ use winit::{
     window::{CursorGrabMode, Window, WindowButtons, WindowLevel},
 };
 
+lazy_static::lazy_static! {
+    static ref WINDOWEVENT_HOOK:
+        parking_lot::RwLock<Option<std::sync::mpsc::Sender<winit::event::WindowEvent>>,
+    > = parking_lot::RwLock::new(None);
+}
+pub fn install_windowevent_hook(sender: std::sync::mpsc::Sender<winit::event::WindowEvent>) {
+    let mut hook = WINDOWEVENT_HOOK.write();
+    assert!(hook.is_none(), "duplicate windowevent hook");
+    *hook = Some(sender);
+}
+
 pub fn screen_size_in_pixels(window: &Window) -> egui::Vec2 {
     let size = if cfg!(target_os = "ios") {
         // `outer_size` Includes the area behind the "dynamic island".
@@ -270,6 +281,10 @@ impl State {
         #[cfg(feature = "accesskit")]
         if let Some(accesskit) = self.accesskit.as_mut() {
             accesskit.process_event(window, event);
+        }
+
+        if let Some(sender) = &*WINDOWEVENT_HOOK.read() {
+            sender.send(event.clone()).unwrap();
         }
 
         use winit::event::WindowEvent;
