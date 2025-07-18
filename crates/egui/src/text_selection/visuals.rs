@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
-use crate::{pos2, vec2, Galley, Painter, Rect, Ui, Visuals};
+use crate::{Galley, Painter, Rect, Ui, Visuals, pos2, vec2};
 
-use super::CursorRange;
+use super::CCursorRange;
 
 #[derive(Clone, Debug)]
 pub struct RowVertexIndices {
@@ -14,7 +14,7 @@ pub struct RowVertexIndices {
 pub fn paint_text_selection(
     galley: &mut Arc<Galley>,
     visuals: &Visuals,
-    cursor_range: &CursorRange,
+    cursor_range: &CCursorRange,
     mut new_vertex_indices: Option<&mut Vec<RowVertexIndices>>,
 ) {
     if cursor_range.is_empty() {
@@ -27,15 +27,16 @@ pub fn paint_text_selection(
 
     let color = visuals.selection.bg_fill;
     let [min, max] = cursor_range.sorted_cursors();
-    let min = min.rcursor;
-    let max = max.rcursor;
+    let min = galley.layout_from_cursor(min);
+    let max = galley.layout_from_cursor(max);
 
     for ri in min.row..=max.row {
-        let row = &mut galley.rows[ri];
+        let row = Arc::make_mut(&mut galley.rows[ri].row);
+
         let left = if ri == min.row {
             row.x_offset(min.column)
         } else {
-            row.rect.left()
+            0.0
         };
         let right = if ri == max.row {
             row.x_offset(max.column)
@@ -45,10 +46,10 @@ pub fn paint_text_selection(
             } else {
                 0.0
             };
-            row.rect.right() + newline_size
+            row.size.x + newline_size
         };
 
-        let rect = Rect::from_min_max(pos2(left, row.min_y()), pos2(right, row.max_y()));
+        let rect = Rect::from_min_max(pos2(left, 0.0), pos2(right, row.size.y));
         let mesh = &mut row.visuals.mesh;
 
         // Time to insert the selection rectangle into the row mesh.
@@ -59,7 +60,11 @@ pub fn paint_text_selection(
         // Start by appending the selection rectangle to end of the mesh, as two triangles (= 6 indices):
         let num_indices_before = mesh.indices.len();
         mesh.add_colored_rect(rect, color);
-        assert_eq!(num_indices_before + 6, mesh.indices.len());
+        assert_eq!(
+            num_indices_before + 6,
+            mesh.indices.len(),
+            "We expect exactly 6 new indices"
+        );
 
         // Copy out the new triangles:
         let selection_triangles = [
@@ -96,19 +101,8 @@ pub fn paint_text_selection(
 pub fn paint_cursor_end(painter: &Painter, visuals: &Visuals, cursor_rect: Rect) {
     let stroke = visuals.text_cursor.stroke;
 
-    // Ensure the cursor is aligned to the pixel grid for whole number widths.
-    // See https://github.com/emilk/egui/issues/5164
-    let (top, bottom) = if (stroke.width as usize) % 2 == 0 {
-        (
-            painter.round_pos_to_pixels(cursor_rect.center_top()),
-            painter.round_pos_to_pixels(cursor_rect.center_bottom()),
-        )
-    } else {
-        (
-            painter.round_pos_to_pixel_center(cursor_rect.center_top()),
-            painter.round_pos_to_pixel_center(cursor_rect.center_bottom()),
-        )
-    };
+    let top = cursor_rect.center_top();
+    let bottom = cursor_rect.center_bottom();
 
     painter.line_segment([top, bottom], (stroke.width, stroke.color));
 

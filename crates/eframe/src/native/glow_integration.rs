@@ -11,13 +11,13 @@ use std::{cell::RefCell, num::NonZeroU32, rc::Rc, sync::Arc, time::Instant};
 
 use egui_winit::ActionRequested;
 use glutin::{
-    config::GlConfig,
-    context::NotCurrentGlContext,
-    display::GetGlDisplay,
-    prelude::{GlDisplay, PossiblyCurrentGlContext},
-    surface::GlSurface,
+    config::GlConfig as _,
+    context::NotCurrentGlContext as _,
+    display::GetGlDisplay as _,
+    prelude::{GlDisplay as _, PossiblyCurrentGlContext as _},
+    surface::GlSurface as _,
 };
-use raw_window_handle::HasWindowHandle;
+use raw_window_handle::HasWindowHandle as _;
 use winit::{
     event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy},
     window::{Window, WindowId},
@@ -32,13 +32,13 @@ use egui::{
 use egui_winit::accesskit_winit;
 
 use crate::{
-    native::epi_integration::EpiIntegration, App, AppCreator, CreationContext, NativeOptions,
-    Result, Storage,
+    App, AppCreator, CreationContext, NativeOptions, Result, Storage,
+    native::epi_integration::EpiIntegration,
 };
 
 use super::{
     epi_integration, event_loop_context,
-    winit_integration::{create_egui_context, EventResult, UserEvent, WinitApp},
+    winit_integration::{EventResult, UserEvent, WinitApp, create_egui_context},
 };
 
 // ----------------------------------------------------------------------------
@@ -139,7 +139,7 @@ impl<'app> GlowWinitApp<'app> {
         }
     }
 
-    #[allow(unsafe_code)]
+    #[expect(unsafe_code)]
     fn create_glutin_windowed_context(
         egui_ctx: &egui::Context,
         event_loop: &ActiveEventLoop,
@@ -272,7 +272,7 @@ impl<'app> GlowWinitApp<'app> {
                 ..
             } = viewport
             {
-                egui_winit.init_accesskit(window, event_loop_proxy);
+                egui_winit.init_accesskit(event_loop, window, event_loop_proxy);
             }
         }
 
@@ -344,7 +344,7 @@ impl<'app> GlowWinitApp<'app> {
     }
 }
 
-impl<'app> WinitApp for GlowWinitApp<'app> {
+impl WinitApp for GlowWinitApp<'_> {
     fn egui_ctx(&self) -> Option<&egui::Context> {
         self.running.as_ref().map(|r| &r.integration.egui_ctx)
     }
@@ -364,6 +364,20 @@ impl<'app> WinitApp for GlowWinitApp<'app> {
         self.running
             .as_ref()
             .and_then(|r| r.glutin.borrow().window_from_viewport.get(&id).copied())
+    }
+
+    fn save(&mut self) {
+        log::debug!("WinitApp::save called");
+        if let Some(running) = self.running.as_mut() {
+            profiling::function_scope!();
+
+            // This is used because of the "save on suspend" logic on Android. Once the application is suspended, there is no window associated to it, which was causing panics when `.window().expect()` was used.
+            let window_opt = running.glutin.borrow().window_opt(ViewportId::ROOT);
+
+            running
+                .integration
+                .save(running.app.as_mut(), window_opt.as_deref());
+        }
     }
 
     fn save_and_destroy(&mut self) {
@@ -413,7 +427,7 @@ impl<'app> WinitApp for GlowWinitApp<'app> {
         if let Some(running) = &mut self.running {
             running.glutin.borrow_mut().on_suspend()?;
         }
-        Ok(EventResult::Wait)
+        Ok(EventResult::Save)
     }
 
     fn device_event(
@@ -479,7 +493,7 @@ impl<'app> WinitApp for GlowWinitApp<'app> {
     }
 }
 
-impl<'app> GlowWinitRunning<'app> {
+impl GlowWinitRunning<'_> {
     fn run_ui_and_paint(
         &mut self,
         event_loop: &ActiveEventLoop,
@@ -887,7 +901,7 @@ fn change_gl_context(
 }
 
 impl GlutinWindowContext {
-    #[allow(unsafe_code)]
+    #[expect(unsafe_code)]
     unsafe fn new(
         egui_ctx: &egui::Context,
         viewport_builder: ViewportBuilder,
@@ -945,7 +959,6 @@ impl GlutinWindowContext {
             .with_preference(glutin_winit::ApiPreference::FallbackEgl)
             .with_window_attributes(Some(egui_winit::create_winit_window_attributes(
                 egui_ctx,
-                event_loop,
                 viewport_builder.clone(),
             )));
 
@@ -1002,7 +1015,9 @@ impl GlutinWindowContext {
         let gl_context = match gl_context_result {
             Ok(it) => it,
             Err(err) => {
-                log::warn!("Failed to create context using default context attributes {context_attributes:?} due to error: {err}");
+                log::warn!(
+                    "Failed to create context using default context attributes {context_attributes:?} due to error: {err}"
+                );
                 log::debug!(
                     "Retrying with fallback context attributes: {fallback_context_attributes:?}"
                 );
@@ -1080,7 +1095,7 @@ impl GlutinWindowContext {
     }
 
     /// Create a surface, window, and winit integration for the viewport, if missing.
-    #[allow(unsafe_code)]
+    #[expect(unsafe_code)]
     pub(crate) fn initialize_window(
         &mut self,
         viewport_id: ViewportId,
@@ -1099,7 +1114,6 @@ impl GlutinWindowContext {
             log::debug!("Creating a window for viewport {viewport_id:?}");
             let window_attributes = egui_winit::create_winit_window_attributes(
                 &self.egui_ctx,
-                event_loop,
                 viewport.builder.clone(),
             );
             if window_attributes.transparent()
@@ -1214,10 +1228,12 @@ impl GlutinWindowContext {
             .expect("viewport doesn't exist")
     }
 
+    fn window_opt(&self, viewport_id: ViewportId) -> Option<Arc<Window>> {
+        self.viewport(viewport_id).window.clone()
+    }
+
     fn window(&self, viewport_id: ViewportId) -> Arc<Window> {
-        self.viewport(viewport_id)
-            .window
-            .clone()
+        self.window_opt(viewport_id)
             .expect("winit window doesn't exist")
     }
 
@@ -1550,6 +1566,6 @@ fn save_screenshot_and_exit(
     });
     log::info!("Screenshot saved to {path:?}.");
 
-    #[allow(clippy::exit)]
+    #[expect(clippy::exit)]
     std::process::exit(0);
 }

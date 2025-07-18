@@ -308,7 +308,7 @@ fn from_ron_str<T: serde::de::DeserializeOwned>(ron: &str) -> Option<T> {
 use crate::Id;
 
 // TODO(emilk): make IdTypeMap generic over the key (`Id`), and make a library of IdTypeMap.
-/// Stores values identified by an [`Id`] AND a the [`std::any::TypeId`] of the value.
+/// Stores values identified by an [`Id`] AND the [`std::any::TypeId`] of the value.
 ///
 /// In other words, it maps `(Id, TypeId)` to any value you want.
 ///
@@ -467,7 +467,7 @@ impl IdTypeMap {
 
     /// For tests
     #[cfg(feature = "persistence")]
-    #[allow(unused)]
+    #[allow(unused, clippy::allow_attributes)]
     fn get_generation<T: SerializableAny>(&self, id: Id) -> Option<usize> {
         let element = self.map.get(&hash(TypeId::of::<T>(), id))?;
         match element {

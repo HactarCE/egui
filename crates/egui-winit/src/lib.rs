@@ -177,12 +177,14 @@ impl State {
     #[cfg(feature = "accesskit")]
     pub fn init_accesskit<T: From<accesskit_winit::Event> + Send>(
         &mut self,
+        event_loop: &ActiveEventLoop,
         window: &Window,
         event_loop_proxy: winit::event_loop::EventLoopProxy<T>,
     ) {
         profiling::function_scope!();
 
         self.accesskit = Some(accesskit_winit::Adapter::with_event_loop_proxy(
+            event_loop,
             window,
             event_loop_proxy,
         ));
@@ -201,7 +203,7 @@ impl State {
 
     /// Places the text onto the clipboard.
     pub fn set_clipboard_text(&mut self, text: String) {
-        self.clipboard.set(text);
+        self.clipboard.set_text(text);
     }
 
     /// Returns [`false`] or the last value that [`Window::set_ime_allowed()`] was called with, used for debouncing.
@@ -348,43 +350,45 @@ impl State {
             }
 
             WindowEvent::Ime(ime) => {
-                if cfg!(target_os = "linux") {
-                    // We ignore IME events on linux, because of https://github.com/emilk/egui/issues/5008
-                } else {
-                    // on Mac even Cmd-C is pressed during ime, a `c` is pushed to Preedit.
-                    // So no need to check is_mac_cmd.
-                    //
-                    // How winit produce `Ime::Enabled` and `Ime::Disabled` differs in MacOS
-                    // and Windows.
-                    //
-                    // - On Windows, before and after each Commit will produce an Enable/Disabled
-                    // event.
-                    // - On MacOS, only when user explicit enable/disable ime. No Disabled
-                    // after Commit.
-                    //
-                    // We use input_method_editor_started to manually insert CompositionStart
-                    // between Commits.
-                    match ime {
-                        winit::event::Ime::Enabled => {
+                // on Mac even Cmd-C is pressed during ime, a `c` is pushed to Preedit.
+                // So no need to check is_mac_cmd.
+                //
+                // How winit produce `Ime::Enabled` and `Ime::Disabled` differs in MacOS
+                // and Windows.
+                //
+                // - On Windows, before and after each Commit will produce an Enable/Disabled
+                // event.
+                // - On MacOS, only when user explicit enable/disable ime. No Disabled
+                // after Commit.
+                //
+                // We use input_method_editor_started to manually insert CompositionStart
+                // between Commits.
+                match ime {
+                    winit::event::Ime::Enabled => {
+                        if cfg!(target_os = "linux") {
+                            // This event means different things in X11 and Wayland, but we can just
+                            // ignore it and enable IME on the preedit event.
+                            // See <https://github.com/rust-windowing/winit/issues/2498>
+                        } else {
                             self.ime_event_enable();
                         }
-                        winit::event::Ime::Preedit(text, Some(_cursor)) => {
-                            self.ime_event_enable();
-                            self.egui_input
-                                .events
-                                .push(egui::Event::Ime(egui::ImeEvent::Preedit(text.clone())));
-                        }
-                        winit::event::Ime::Commit(text) => {
-                            self.egui_input
-                                .events
-                                .push(egui::Event::Ime(egui::ImeEvent::Commit(text.clone())));
-                            self.ime_event_disable();
-                        }
-                        winit::event::Ime::Disabled | winit::event::Ime::Preedit(_, None) => {
-                            self.ime_event_disable();
-                        }
-                    };
-                }
+                    }
+                    winit::event::Ime::Preedit(text, Some(_cursor)) => {
+                        self.ime_event_enable();
+                        self.egui_input
+                            .events
+                            .push(egui::Event::Ime(egui::ImeEvent::Preedit(text.clone())));
+                    }
+                    winit::event::Ime::Commit(text) => {
+                        self.egui_input
+                            .events
+                            .push(egui::Event::Ime(egui::ImeEvent::Commit(text.clone())));
+                        self.ime_event_disable();
+                    }
+                    winit::event::Ime::Disabled | winit::event::Ime::Preedit(_, None) => {
+                        self.ime_event_disable();
+                    }
+                };
 
                 EventResponse {
                     repaint: true,
@@ -740,7 +744,7 @@ impl State {
             // When telling users "Press Ctrl-F to find", this is where we should
             // look for the "F" key, because they may have a dvorak layout on
             // a qwerty keyboard, and so the logical "F" character may not be located on the physical `KeyCode::KeyF` position.
-            logical_key,
+            logical_key: winit_logical_key,
 
             text,
 
@@ -759,7 +763,7 @@ impl State {
             None
         };
 
-        let logical_key = key_from_winit_key(logical_key);
+        let logical_key = key_from_winit_key(winit_logical_key);
 
         // Helpful logging to enable when adding new key support
         log::trace!(
@@ -802,7 +806,11 @@ impl State {
             });
         }
 
-        if let Some(text) = &text {
+        if let Some(text) = text
+            .as_ref()
+            .map(|t| t.as_str())
+            .or_else(|| winit_logical_key.to_text())
+        {
             // Make sure there is text, and that it is not control characters
             // (e.g. delete is sent as "\u{f728}" on macOS).
             if !text.is_empty() && text.chars().all(is_printable_char) {
@@ -816,7 +824,7 @@ impl State {
                 if pressed && !is_cmd {
                     self.egui_input
                         .events
-                        .push(egui::Event::Text(text.to_string()));
+                        .push(egui::Event::Text(text.to_owned()));
                 }
             }
         }
@@ -835,9 +843,11 @@ impl State {
         window: &Window,
         platform_output: egui::PlatformOutput,
     ) {
+        #![allow(deprecated)]
         profiling::function_scope!();
 
         let egui::PlatformOutput {
+            commands,
             cursor_icon,
             open_url,
             copied_text,
@@ -850,6 +860,20 @@ impl State {
             request_discard_reasons: _, // `egui::Context::run` handles this
         } = platform_output;
 
+        for command in commands {
+            match command {
+                egui::OutputCommand::CopyText(text) => {
+                    self.clipboard.set_text(text);
+                }
+                egui::OutputCommand::CopyImage(image) => {
+                    self.clipboard.set_image(&image);
+                }
+                egui::OutputCommand::OpenUrl(open_url) => {
+                    open_url_in_browser(&open_url.url);
+                }
+            }
+        }
+
         self.set_cursor_icon(window, cursor_icon);
 
         if let Some(open_url) = open_url {
@@ -857,7 +881,7 @@ impl State {
         }
 
         if !copied_text.is_empty() {
-            self.clipboard.set(copied_text);
+            self.clipboard.set_text(copied_text);
         }
 
         let allow_ime = ime.is_some();
@@ -1135,6 +1159,8 @@ fn key_from_named_key(named_key: winit::keyboard::NamedKey) -> Option<egui::Key>
         NamedKey::F33 => Key::F33,
         NamedKey::F34 => Key::F34,
         NamedKey::F35 => Key::F35,
+
+        NamedKey::BrowserBack => Key::BrowserBack,
         _ => {
             log::trace!("Unknown key: {named_key:?}");
             return None;
@@ -1555,8 +1581,7 @@ pub fn create_window(
 ) -> Result<Window, winit::error::OsError> {
     profiling::function_scope!();
 
-    let window_attributes =
-        create_winit_window_attributes(egui_ctx, event_loop, viewport_builder.clone());
+    let window_attributes = create_winit_window_attributes(egui_ctx, viewport_builder.clone());
     let window = event_loop.create_window(window_attributes)?;
     apply_viewport_builder_to_window(egui_ctx, &window, viewport_builder);
     Ok(window)
@@ -1564,27 +1589,9 @@ pub fn create_window(
 
 pub fn create_winit_window_attributes(
     egui_ctx: &egui::Context,
-    event_loop: &ActiveEventLoop,
     viewport_builder: ViewportBuilder,
 ) -> winit::window::WindowAttributes {
     profiling::function_scope!();
-
-    // We set sizes and positions in egui:s own ui points, which depends on the egui
-    // zoom_factor and the native pixels per point, so we need to know that here.
-    // We don't know what monitor the window will appear on though, but
-    // we'll try to fix that after the window is created in the call to `apply_viewport_builder_to_window`.
-    let native_pixels_per_point = event_loop
-        .primary_monitor()
-        .or_else(|| event_loop.available_monitors().next())
-        .map_or_else(
-            || {
-                log::debug!("Failed to find a monitor - assuming native_pixels_per_point of 1.0");
-                1.0
-            },
-            |m| m.scale_factor() as f32,
-        );
-    let zoom_factor = egui_ctx.zoom_factor();
-    let pixels_per_point = zoom_factor * native_pixels_per_point;
 
     let ViewportBuilder {
         title,
@@ -1607,9 +1614,11 @@ pub fn create_winit_window_attributes(
 
         // macOS:
         fullsize_content_view: _fullsize_content_view,
+        movable_by_window_background: _movable_by_window_background,
         title_shown: _title_shown,
         titlebar_buttons_shown: _titlebar_buttons_shown,
         titlebar_shown: _titlebar_shown,
+        has_shadow: _has_shadow,
 
         // Windows:
         drag_and_drop: _drag_and_drop,
@@ -1659,40 +1668,46 @@ pub fn create_winit_window_attributes(
         })
         .with_active(active.unwrap_or(true));
 
+    // Here and below: we create `LogicalSize` / `LogicalPosition` taking
+    // zoom factor into account. We don't have a good way to get physical size here,
+    // and trying to do it anyway leads to weird bugs on Wayland, see:
+    // https://github.com/emilk/egui/issues/7095#issuecomment-2920545377
+    // https://github.com/rust-windowing/winit/issues/4266
+    #[expect(
+        clippy::disallowed_types,
+        reason = "zoom factor is manually accounted for"
+    )]
     #[cfg(not(target_os = "ios"))]
-    if let Some(size) = inner_size {
-        window_attributes = window_attributes.with_inner_size(PhysicalSize::new(
-            pixels_per_point * size.x,
-            pixels_per_point * size.y,
-        ));
-    }
+    {
+        use winit::dpi::{LogicalPosition, LogicalSize};
+        let zoom_factor = egui_ctx.zoom_factor();
 
-    #[cfg(not(target_os = "ios"))]
-    if let Some(size) = min_inner_size {
-        window_attributes = window_attributes.with_min_inner_size(PhysicalSize::new(
-            pixels_per_point * size.x,
-            pixels_per_point * size.y,
-        ));
-    }
+        if let Some(size) = inner_size {
+            window_attributes = window_attributes
+                .with_inner_size(LogicalSize::new(zoom_factor * size.x, zoom_factor * size.y));
+        }
 
-    #[cfg(not(target_os = "ios"))]
-    if let Some(size) = max_inner_size {
-        window_attributes = window_attributes.with_max_inner_size(PhysicalSize::new(
-            pixels_per_point * size.x,
-            pixels_per_point * size.y,
-        ));
-    }
+        if let Some(size) = min_inner_size {
+            window_attributes = window_attributes
+                .with_min_inner_size(LogicalSize::new(zoom_factor * size.x, zoom_factor * size.y));
+        }
 
-    #[cfg(not(target_os = "ios"))]
-    if let Some(pos) = position {
-        window_attributes = window_attributes.with_position(PhysicalPosition::new(
-            pixels_per_point * pos.x,
-            pixels_per_point * pos.y,
-        ));
+        if let Some(size) = max_inner_size {
+            window_attributes = window_attributes
+                .with_max_inner_size(LogicalSize::new(zoom_factor * size.x, zoom_factor * size.y));
+        }
+
+        if let Some(pos) = position {
+            window_attributes = window_attributes.with_position(LogicalPosition::new(
+                zoom_factor * pos.x,
+                zoom_factor * pos.y,
+            ));
+        }
     }
     #[cfg(target_os = "ios")]
     {
         // Unused:
+        _ = egui_ctx;
         _ = pixels_per_point;
         _ = position;
         _ = inner_size;
@@ -1753,7 +1768,9 @@ pub fn create_winit_window_attributes(
             .with_title_hidden(!_title_shown.unwrap_or(true))
             .with_titlebar_buttons_hidden(!_titlebar_buttons_shown.unwrap_or(true))
             .with_titlebar_transparent(!_titlebar_shown.unwrap_or(true))
-            .with_fullsize_content_view(_fullsize_content_view.unwrap_or(false));
+            .with_fullsize_content_view(_fullsize_content_view.unwrap_or(false))
+            .with_movable_by_window_background(_movable_by_window_background.unwrap_or(false))
+            .with_has_shadow(_has_shadow.unwrap_or(true));
     }
 
     window_attributes
@@ -1821,6 +1838,9 @@ pub fn apply_viewport_builder_to_window(
             let pos = PhysicalPosition::new(pixels_per_point * pos.x, pixels_per_point * pos.y);
             window.set_outer_position(pos);
         }
+        if let Some(maximized) = builder.maximized {
+            window.set_maximized(maximized);
+        }
     }
 }
 
@@ -1832,8 +1852,8 @@ pub fn short_device_event_description(event: &winit::event::DeviceEvent) -> &'st
     use winit::event::DeviceEvent;
 
     match event {
-        DeviceEvent::Added { .. } => "DeviceEvent::Added",
-        DeviceEvent::Removed { .. } => "DeviceEvent::Removed",
+        DeviceEvent::Added => "DeviceEvent::Added",
+        DeviceEvent::Removed => "DeviceEvent::Removed",
         DeviceEvent::MouseMotion { .. } => "DeviceEvent::MouseMotion",
         DeviceEvent::MouseWheel { .. } => "DeviceEvent::MouseWheel",
         DeviceEvent::Motion { .. } => "DeviceEvent::Motion",
@@ -1851,11 +1871,11 @@ pub fn short_window_event_description(event: &winit::event::WindowEvent) -> &'st
         WindowEvent::ActivationTokenDone { .. } => "WindowEvent::ActivationTokenDone",
         WindowEvent::Resized { .. } => "WindowEvent::Resized",
         WindowEvent::Moved { .. } => "WindowEvent::Moved",
-        WindowEvent::CloseRequested { .. } => "WindowEvent::CloseRequested",
-        WindowEvent::Destroyed { .. } => "WindowEvent::Destroyed",
+        WindowEvent::CloseRequested => "WindowEvent::CloseRequested",
+        WindowEvent::Destroyed => "WindowEvent::Destroyed",
         WindowEvent::DroppedFile { .. } => "WindowEvent::DroppedFile",
         WindowEvent::HoveredFile { .. } => "WindowEvent::HoveredFile",
-        WindowEvent::HoveredFileCancelled { .. } => "WindowEvent::HoveredFileCancelled",
+        WindowEvent::HoveredFileCancelled => "WindowEvent::HoveredFileCancelled",
         WindowEvent::Focused { .. } => "WindowEvent::Focused",
         WindowEvent::KeyboardInput { .. } => "WindowEvent::KeyboardInput",
         WindowEvent::ModifiersChanged { .. } => "WindowEvent::ModifiersChanged",
@@ -1866,7 +1886,7 @@ pub fn short_window_event_description(event: &winit::event::WindowEvent) -> &'st
         WindowEvent::MouseWheel { .. } => "WindowEvent::MouseWheel",
         WindowEvent::MouseInput { .. } => "WindowEvent::MouseInput",
         WindowEvent::PinchGesture { .. } => "WindowEvent::PinchGesture",
-        WindowEvent::RedrawRequested { .. } => "WindowEvent::RedrawRequested",
+        WindowEvent::RedrawRequested => "WindowEvent::RedrawRequested",
         WindowEvent::DoubleTapGesture { .. } => "WindowEvent::DoubleTapGesture",
         WindowEvent::RotationGesture { .. } => "WindowEvent::RotationGesture",
         WindowEvent::TouchpadPressure { .. } => "WindowEvent::TouchpadPressure",
