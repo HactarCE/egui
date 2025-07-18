@@ -1,12 +1,12 @@
 use epaint::Shape;
 
 use crate::{
-    epaint, style::StyleModifier, style::WidgetVisuals, vec2, Align2, Context, Id, InnerResponse,
-    NumExt, Painter, Popup, PopupCloseBehavior, Rect, Response, ScrollArea, Sense, Stroke,
-    TextStyle, TextWrapMode, Ui, UiBuilder, Vec2, WidgetInfo, WidgetText, WidgetType,
+    Align2, Context, Id, InnerResponse, NumExt as _, Painter, Popup, PopupCloseBehavior, Rect,
+    Response, ScrollArea, Sense, Stroke, TextStyle, TextWrapMode, Ui, UiBuilder, Vec2, WidgetInfo,
+    WidgetText, WidgetType, epaint, style::StyleModifier, style::WidgetVisuals, vec2,
 };
 
-#[allow(unused_imports)] // Documentation
+#[expect(unused_imports)] // Documentation
 use crate::style::Spacing;
 
 /// A function that paints the [`ComboBox`] icon
@@ -16,9 +16,10 @@ pub type IconPainter = Box<dyn FnOnce(&Ui, Rect, &WidgetVisuals, bool)>;
 ///
 /// ```
 /// # egui::__run_test_ui(|ui| {
-/// # #[derive(Debug, PartialEq)]
+/// # #[derive(Debug, PartialEq, Copy, Clone)]
 /// # enum Enum { First, Second, Third }
 /// # let mut selected = Enum::First;
+/// let before = selected;
 /// egui::ComboBox::from_label("Select one!")
 ///     .selected_text(format!("{:?}", selected))
 ///     .show_ui(ui, |ui| {
@@ -27,6 +28,10 @@ pub type IconPainter = Box<dyn FnOnce(&Ui, Rect, &WidgetVisuals, bool)>;
 ///         ui.selectable_value(&mut selected, Enum::Third, "Third");
 ///     }
 /// );
+///
+/// if selected != before {
+///     // Handle selection change
+/// }
 /// # });
 /// ```
 #[must_use = "You should call .show*"]
@@ -86,7 +91,7 @@ impl ComboBox {
     }
 
     /// Without label.
-    #[deprecated = "Renamed id_salt"]
+    #[deprecated = "Renamed from_id_salt"]
     pub fn from_id_source(id_salt: impl std::hash::Hash) -> Self {
         Self::from_id_salt(id_salt)
     }
@@ -288,7 +293,7 @@ impl ComboBox {
 
     /// Check if the [`ComboBox`] with the given id has its popup menu currently opened.
     pub fn is_open(ctx: &Context, id: Id) -> bool {
-        ctx.memory(|m| m.is_popup_open(Self::widget_to_popup_id(id)))
+        Popup::is_id_open(ctx, Self::widget_to_popup_id(id))
     }
 
     /// Convert a [`ComboBox`] id to the id used to store it's popup state.
@@ -297,7 +302,7 @@ impl ComboBox {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn combo_box_dyn<'c, R>(
     ui: &mut Ui,
     button_id: Id,
@@ -310,7 +315,7 @@ fn combo_box_dyn<'c, R>(
 ) -> InnerResponse<Option<R>> {
     let popup_id = ComboBox::widget_to_popup_id(button_id);
 
-    let is_popup_open = ui.memory(|m| m.is_popup_open(popup_id));
+    let is_popup_open = Popup::is_id_open(ui.ctx(), popup_id);
 
     let wrap_mode = wrap_mode.unwrap_or_else(|| ui.wrap_mode());
 
